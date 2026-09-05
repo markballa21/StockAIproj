@@ -57,50 +57,63 @@ class DataLoader:
                 return dt
             return None
 
-    def sync_symbol_data(self, symbol: str, timeframe_str: str, alpaca_tf: TimeFrame, default_days_back: int,) -> int:
-        """סנכרון דלתא עד הרגע האחרון מול Alpaca ושמירה ב-SQL."""
-        last_dt = self.get_last_candle_time(symbol, timeframe_str)
-        now_utc = datetime.now(timezone.utc)
-        end_dt = now_utc - timedelta(minutes=15)
+    def sync_symbol_data(self,symbol: str,timeframe_str: str = "1m", alpaca_timeframe: Optional[TimeFrame] = None,
+            days_back: int = 1, ) -> int:
+        """משיכת נרות מאלפקא ושמירה ל-SQLite עם טיפול מלא במצבי שוק סגור."""
+        if alpaca_timeframe is None:
+            if timeframe_str == "1D":
+                alpaca_timeframe = TimeFrame.Day
+            elif timeframe_str == "1H":
+                alpaca_timeframe = TimeFrame.Hour
+            else:
+                alpaca_timeframe = TimeFrame.Minute
 
-        if last_dt:
-            start_dt = last_dt
-        else:
-            start_dt = now_utc - timedelta(days=default_days_back)
-
-        if start_dt >= end_dt:
-            return 0
-
-        if (end_dt - start_dt).total_seconds() < 60 and timeframe_str == "1m":
-            return 0
+        # 2. חישוב טווח זמנים מבוסס ימי מסחר
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(days=max(days_back, 3))
 
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=alpaca_tf,
+            timeframe=alpaca_timeframe,
             start=start_dt,
             end=end_dt,
             feed=DataFeed.IEX,
         )
-        bars = self.client.get_stock_bars(req)
-        df = bars.df
 
-        if df.empty:
+        try:
+            bars = self.client.get_stock_bars(req)
+            if bars.df.empty:
+                return 0
+
+            df = bars.df.reset_index()
+            df["ticker"] = symbol
+            df["timeframe"] = timeframe_str
+            df["timestamp"] = df["timestamp"].astype(str)
+
+            clean_df = df[[
+                "ticker",
+                "timeframe",
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ]]
+
+            with sqlite3.connect(self.db_path) as conn:
+                clean_df.to_sql(
+                    "temp_candles", conn, if_exists="replace", index=False
+                )
+                cursor = conn.execute("""
+                      INSERT OR REPLACE INTO candles 
+                      SELECT * FROM temp_candles;
+                  """)
+                conn.execute("DROP TABLE temp_candles;")
+                return cursor.rowcount
+        except Exception as e:
+            print(f"Error fetching bars for {symbol} ({timeframe_str}): {e}")
             return 0
-
-        df = df.reset_index()
-        df["ticker"] = symbol
-        df["timeframe"] = timeframe_str
-        df["timestamp"] = df["timestamp"].astype(str)
-        clean_df = df[["ticker", "timeframe", "timestamp", "open", "high", "low", "close", "volume"]]
-
-        with sqlite3.connect(self.db_path) as conn:
-            clean_df.to_sql("temp_candles", conn, if_exists="replace", index=False)
-            cursor = conn.execute("""
-                INSERT OR REPLACE INTO candles 
-                SELECT * FROM temp_candles;
-            """)
-            conn.execute("DROP TABLE temp_candles;")
-            return cursor.rowcount
 
     def generate_resampled_timeframes(self, symbol: str) -> Dict[str, int]:
         """בניית נרות 5m, 15m, 1H ישירות מנתוני ה-1m המקומיים לחיסכון של 80% בקריאות API."""

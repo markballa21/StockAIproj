@@ -1,6 +1,11 @@
-# src/replay_engine.py
+"""MarketReplayEngine: מנוע סימולציה ובק-טסטינג נר-אחר-נר ב-RAM.
+
+מדמה יום מסחר מלא (09:30-16:00 EST) מתוך SQLite ללא הצצה לעתיד (Lookahead Bias).
+"""
+
+from dataclasses import dataclass
 import sqlite3
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import pandas as pd
 import pytz
 
@@ -9,224 +14,266 @@ from config import Config
 from src.processor import DataProcessor
 
 
+@dataclass
+class ReplayPosition:
+  symbol: str
+  entry_price: float
+  stop_loss: float
+  take_profit: float
+  entry_time: str
+  shares: int
+  action: str  # BUY / SELL
+  confidence: float
+  reasoning: str
+
+
 class MarketReplayEngine:
-    """מנוע סימולציה היסטורי עם תמיכה באזורי זמן, עמלות מחמירות וחוקי זמן קשיחים."""
 
-    def __init__(self, db_path: str = "market_data.db"):
-        self.db_path = db_path
-        self.config = Config()
-        self.orchestrator = TradingOrchestrator(
-            api_key=self.config.GEMINI_API_KEY,
-            model_name=self.config.GEMINI_MODEL,
-        )
-        self.ny_tz = pytz.timezone("America/New_York")
+  def __init__(self, db_path: str = "market_data.db"):
+    self.db_path = db_path
+    self.ny_tz = pytz.timezone("America/New_York")
+    self.config = Config()
+    self.orchestrator = TradingOrchestrator()
 
-    def _fetch_candles_range(
-            self, ticker: str, timeframe: str, start_dt: str, end_dt: str
-    ) -> pd.DataFrame:
-        """שליפת נרות מחלון זמן מוגדר מתוך ה-SQL."""
-        query = """
+  # =========================================================================
+  # 1. שליפת נתונים והמרת אזורי זמן (Timezone Alignment)
+  # =========================================================================
+  def _load_timeframe_history(
+      self, ticker: str, timeframe: str, cutoff_iso: str, limit: int
+  ) -> pd.DataFrame:
+    """שליפת נרות היסטוריים עד לדקה הנוכחית בסימולציה."""
+    query = """
             SELECT timestamp, open, high, low, close, volume 
             FROM candles 
-            WHERE ticker = ? AND timeframe = ? AND timestamp BETWEEN ? AND ?
-            ORDER BY timestamp ASC
+            WHERE ticker = ? AND timeframe = ? AND timestamp <= ?
+            ORDER BY timestamp DESC 
+            LIMIT ?;
         """
-        with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query(
-                query, conn, params=(ticker, timeframe, start_dt, end_dt)
-            )
-        if not df.empty and "timestamp" in df.columns:
-            # המרה ל-UTC ומעבר לזמן ניו יורק (EST/EDT)
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-            df["timestamp_est"] = df["timestamp"].dt.tz_convert(self.ny_tz)
-        return df
+    with sqlite3.connect(self.db_path) as conn:
+      df = pd.read_sql(query, conn, params=(ticker, timeframe, cutoff_iso, limit))
 
-    def calculate_commission(self, shares: int) -> float:
-        """חישוב עמלה מחמירה: $2.00 קבוע הלוך ושוב + $0.01 למניה (הלוך-חזור)."""
-        flat_fee_roundtrip = 2.00  # $1 קנייה + $1 מכירה
-        per_share_fee_roundtrip = shares * 0.01  # $0.005 למניה בכל צד
-        return round(flat_fee_roundtrip + per_share_fee_roundtrip, 2)
+    if not df.empty:
+      df["timestamp"] = pd.to_datetime(df["timestamp"])
+      df = df.sort_values("timestamp", ascending=True).reset_index(drop=True)
+    return df
 
-    def run_simulation_day(
-            self,
-            ticker: str,
-            date_str: str,
-            features_config: Dict[str, Any] = None,
-            agents_config: Dict[str, Any] = None,
-            capital: float = 10000.0,
-            risk_per_trade_pct: float = 0.01,
-            cutoff_time_str: str = "15:30",  # חסימת עסקאות אחרי 15:30
-    ) -> Dict[str, Any]:
-        """הרצת יום מסחר מלא עם המרת זמן וחישוב עמלות."""
-        # 1. שליפת נתוני מאקרו עד תחילת היום (לפי UTC רחב)
-        df_daily = self._fetch_candles_range(
-            ticker=ticker,
-            timeframe="1D",
-            start_dt="2020-01-01 00:00:00",
-            end_dt=f"{date_str} 23:59:59",
+  def _load_full_day_1m(self, ticker: str, date_str: str) -> pd.DataFrame:
+    """שליפת כל נרות ה-1m של יום הסימולציה מתוך מסד הנתונים."""
+    query = """
+            SELECT timestamp, open, high, low, close, volume 
+            FROM candles 
+            WHERE ticker = ? AND timeframe = '1m' AND timestamp LIKE ?
+            ORDER BY timestamp ASC;
+        """
+    with sqlite3.connect(self.db_path) as conn:
+      df = pd.read_sql(query, conn, params=(ticker, f"{date_str}%"))
+
+    if df.empty:
+      return df
+
+    # המרה ל-Datetime ויישור אזור זמן ל-America/New_York (EST)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if df["timestamp"].dt.tz is None:
+      df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
+    df["timestamp_ny"] = df["timestamp"].dt.tz_convert(self.ny_tz)
+    return df
+
+  # =========================================================================
+  # 2. מנוע הסימולציה הראשי (Event-Driven Simulation)
+  # =========================================================================
+  def run_simulation_day(
+      self,
+      ticker: str,
+      date_str: str,
+      features_config: Dict[str, Any],
+      agents_config: Dict[str, Any],
+      capital: float = 10000.0,
+      risk_per_trade_pct: float = 0.01,
+  ) -> Dict[str, Any]:
+    """הרצת יום מסחר מלא עבור מניה תוך דימוי פקודות Bracket ועמלות ריאליות."""
+    df_day = self._load_full_day_1m(ticker, date_str)
+    if df_day.empty or len(df_day) < 30:
+      return {
+          "ticker": ticker,
+          "date": date_str,
+          "pnl": 0.0,
+          "trade_logs": [],
+          "message": (
+              f"אין מספיק נתוני 1 דקה עבור {ticker} בתאריך {date_str} (נמצאו"
+              f" {len(df_day)} נרות)."
+          ),
+      }
+
+    active_position: Optional[ReplayPosition] = None
+    trade_logs: List[Dict[str, Any]] = []
+    current_balance = float(capital)
+
+    # סימולציה מ-30 נרות ראשונים ועד לסוף היום
+    for idx in range(30, len(df_day)):
+      current_candle = df_day.iloc[idx]
+      ts_ny = current_candle["timestamp_ny"]
+      curr_time_str = ts_ny.strftime("%H:%M")
+      curr_iso_utc = str(current_candle["timestamp"])
+
+      # -------------------------------------------------------------
+      # א. בדיקת פוזיציה פתוחה מול נתוני הנר הנוכחי (SL / TP / EOD)
+      # -------------------------------------------------------------
+      if active_position is not None:
+        exit_event = self._check_position_exit(
+            pos=active_position,
+            candle=current_candle,
+            is_eod=(idx == len(df_day) - 1 or curr_time_str >= "15:58"),
+        )
+        if exit_event:
+          net_pnl = exit_event["pnl"]
+          current_balance += net_pnl
+          trade_logs.append(exit_event)
+          active_position = None
+          continue
+
+      # -------------------------------------------------------------
+      # ב. חסימת כניסה לפוזיציות חדשות בחצי השעה האחרונה (15:30 EST)
+      # -------------------------------------------------------------
+      if curr_time_str >= "15:30":
+        continue
+
+      # -------------------------------------------------------------
+      # ג. הכנת נתוני Multi-Timeframe ב-RAM והפעלת DataProcessor
+      # -------------------------------------------------------------
+      raw_dfs = {
+          "1m": df_day.iloc[: idx + 1][
+              ["timestamp", "open", "high", "low", "close", "volume"]
+          ].tail(60),
+          "15m": self._load_timeframe_history(
+              ticker, "15m", curr_iso_utc, limit=50
+          ),
+          "1D": self._load_timeframe_history(
+              ticker, "1D", curr_iso_utc, limit=200
+          ),
+      }
+
+      # חילוץ ה-Bundle המפולח לכל סוכן
+      data_bundle = DataProcessor.build_multi_agent_bundle(
+          raw_dfs, features_config
+      )
+
+      # -------------------------------------------------------------
+      # ד. פנייה לתזמורת הסוכנים לקבלת החלטה
+      # -------------------------------------------------------------
+      decision = self.orchestrator.evaluate_symbol(
+          symbol=ticker, data_bundle=data_bundle, rules_pack=agents_config
+      )
+
+      # -------------------------------------------------------------
+      # ה. פתיחת פוזיציה במידה והתקבל אישור BUY / SELL
+      # -------------------------------------------------------------
+      action = decision.get("action")
+      if action in ["BUY", "SELL"]:
+        entry_price = float(decision.get("entry_price", current_candle["close"]))
+        stop_loss = float(decision.get("stop_loss", 0.0))
+        take_profit = float(decision.get("take_profit", 0.0))
+
+        # חישוב גודל פוזיציה מבוסס סיכון (1% מגובה החשבון)
+        risk_amount = current_balance * risk_per_trade_pct
+        per_share_risk = abs(entry_price - stop_loss)
+        if per_share_risk <= 0.01:
+          per_share_risk = entry_price * 0.005  # 0.5% Fallback
+
+        shares = max(1, int(risk_amount / per_share_risk))
+        # הגבלה שלא לחרוג מההון הקיים
+        if (shares * entry_price) > current_balance:
+          shares = max(1, int(current_balance / entry_price))
+
+        active_position = ReplayPosition(
+            symbol=ticker,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            entry_time=str(ts_ny)[:19],
+            shares=shares,
+            action=action,
+            confidence=float(decision.get("confidence", 0.5)),
+            reasoning=decision.get("reasoning", ""),
         )
 
-        macro_payload = {}
-        if not df_daily.empty:
-            proc_daily = DataProcessor(df_daily)
-            proc_daily.calculate_indicators()
-            macro_payload = proc_daily.get_latest_summary()
+    total_pnl = sum(t["pnl"] for t in trade_logs)
+    return {
+        "ticker": ticker,
+        "date": date_str,
+        "pnl": round(total_pnl, 2),
+        "trade_logs": trade_logs,
+        "ending_balance": round(current_balance, 2),
+    }
 
-        # 2. שליפת נרות 1 דקה לאותו יום
-        df_intraday_raw = self._fetch_candles_range(
-            ticker, "1m", f"{date_str} 00:00:00", f"{date_str} 23:59:59"
-        )
+  # =========================================================================
+  # 3. ניהול יציאות, עמלות ריאליות וסגירת עסקאות
+  # =========================================================================
+  def _check_position_exit(
+      self, pos: ReplayPosition, candle: pd.Series, is_eod: bool
+  ) -> Optional[Dict[str, Any]]:
+    """בדיקת פגיעה ב-SL/TP או סגירת סוף יום וחישוב PnL בניכוי עמלות."""
+    high = float(candle["high"])
+    low = float(candle["low"])
+    close = float(candle["close"])
+    ts_str = str(candle["timestamp_ny"])[:19]
 
-        if df_intraday_raw.empty:
-            return {
-                "pnl": 0.0,
-                "net_pnl": 0.0,
-                "total_commissions": 0.0,
-                "trade_logs": [],
-                "message": f"No intraday data found for {ticker} on {date_str}",
-            }
+    exit_price = None
+    exit_reason = None
+    result = None
 
-        # סינון שעות מסחר סדירות בניו יורק (09:30 עד 16:00 EST)
-        df_intraday = df_intraday_raw[
-            (df_intraday_raw["timestamp_est"].dt.strftime("%H:%M") >= "09:30")
-            & (df_intraday_raw["timestamp_est"].dt.strftime("%H:%M") <= "16:00")
-            ].copy().reset_index(drop=True)
+    if pos.action == "BUY":
+      if low <= pos.stop_loss:
+        exit_price = pos.stop_loss
+        exit_reason = "SL_HIT"
+        result = "LOSS"
+      elif high >= pos.take_profit:
+        exit_price = pos.take_profit
+        exit_reason = "TP_HIT"
+        result = "WIN"
+      elif is_eod:
+        exit_price = close
+        exit_reason = "EOD_CLOSE"
+        result = "WIN" if exit_price > pos.entry_price else "LOSS"
 
-        if len(df_intraday) < 30:
-            return {
-                "pnl": 0.0,
-                "net_pnl": 0.0,
-                "total_commissions": 0.0,
-                "trade_logs": [],
-                "message": f"Insufficient regular market hours data for {ticker} on {date_str}",
-            }
+    elif pos.action == "SELL":
+      if high >= pos.stop_loss:
+        exit_price = pos.stop_loss
+        exit_reason = "SL_HIT"
+        result = "LOSS"
+      elif low <= pos.take_profit:
+        exit_price = pos.take_profit
+        exit_reason = "TP_HIT"
+        result = "WIN"
+      elif is_eod:
+        exit_price = close
+        exit_reason = "EOD_CLOSE"
+        result = "WIN" if exit_price < pos.entry_price else "LOSS"
 
-        trade_logs: List[Dict[str, Any]] = []
-        current_position: Dict[str, Any] = None
-        daily_gross_pnl = 0.0
-        daily_commissions = 0.0
+    if exit_price is None:
+      return None
 
-        for i in range(25, len(df_intraday)):
-            window_slice = df_intraday.iloc[: i + 1].copy()
-            current_bar = window_slice.iloc[-1]
-            current_price = float(current_bar["close"])
-            current_est_str = current_bar["timestamp_est"].strftime("%H:%M:%S")
-            current_est_hm = current_bar["timestamp_est"].strftime("%H:%M")
+    # חישוב PnL גולמי
+    if pos.action == "BUY":
+      gross_pnl = (exit_price - pos.entry_price) * pos.shares
+    else:
+      gross_pnl = (pos.entry_price - exit_price) * pos.shares
 
-            # א. ניהול סגירת פוזיציה קיימת
-            if current_position:
-                high_p = float(current_bar["high"])
-                low_p = float(current_bar["low"])
-                pos_type = current_position["action"]
+    # מודל עמלות מחמיר: $2.00 קבוע (Round-Trip) + $0.005 לכל מניה
+    commission = 2.00 + (pos.shares * 0.005 * 2)
+    net_pnl = gross_pnl - commission
 
-                hit_tp = False
-                hit_sl = False
-
-                if pos_type == "BUY":
-                    if high_p >= current_position["tp"]:
-                        hit_tp = True
-                    elif low_p <= current_position["sl"]:
-                        hit_sl = True
-                elif pos_type == "SELL":
-                    if low_p <= current_position["tp"]:
-                        hit_tp = True
-                    elif high_p >= current_position["sl"]:
-                        hit_sl = True
-
-                is_eod = (i == len(df_intraday) - 1) or (current_est_hm >= "15:59")
-
-                if hit_tp or hit_sl or is_eod:
-                    exit_price = (
-                        current_position["tp"]
-                        if hit_tp
-                        else (current_position["sl"] if hit_sl else current_price)
-                    )
-                    shares = current_position["shares"]
-                    trade_gross = (
-                        (exit_price - current_position["entry_price"]) * shares
-                        if pos_type == "BUY"
-                        else (current_position["entry_price"] - exit_price) * shares
-                    )
-
-                    commission = self.calculate_commission(shares)
-                    trade_net = trade_gross - commission
-
-                    daily_gross_pnl += trade_gross
-                    daily_commissions += commission
-
-                    current_position.update(
-                        {
-                            "exit_time_est": current_est_str,
-                            "exit_price": exit_price,
-                            "gross_pnl": round(trade_gross, 2),
-                            "commission": commission,
-                            "net_pnl": round(trade_net, 2),
-                            "result": "WIN" if trade_net > 0 else ("LOSS" if trade_net < 0 else "BE"),
-                            "exit_reason": "TP_HIT" if hit_tp else ("SL_HIT" if hit_sl else "EOD_CLOSE"),
-                        }
-                    )
-                    trade_logs.append(current_position)
-                    current_position = None
-                    continue
-
-            # ב. חסימת כניסות חדשות בחצי השעה האחרונה (>= 15:30 EST)
-            if current_est_hm >= cutoff_time_str:
-                continue
-
-            # ג. עיבוד אינדיקטורים ב-RAM
-            processor = DataProcessor(window_slice)
-            processor.calculate_indicators(features_config)
-            trigger_summary = processor.get_latest_summary()
-            structure_summary = trigger_summary.copy()
-
-            bundle = {
-                "macro": macro_payload,
-                "structure": structure_summary,
-                "trigger": trigger_summary,
-            }
-
-            # ד. בחינת סטאפ מול סוכני ה-AI
-            if not current_position:
-                decision = self.orchestrator.evaluate_symbol(
-                    symbol=ticker,
-                    data_bundle=bundle,
-                    rules_pack=agents_config,
-                )
-
-                if decision.get("action") in ["BUY", "SELL"]:
-                    entry_px = decision.get("entry_price", current_price)
-                    sl_px = decision.get(
-                        "stop_loss",
-                        entry_px * 0.99 if decision["action"] == "BUY" else entry_px * 1.01,
-                    )
-                    tp_px = decision.get(
-                        "take_profit",
-                        entry_px * 1.02 if decision["action"] == "BUY" else entry_px * 0.98,
-                    )
-
-                    # ניהול סיכונים
-                    risk_amount = capital * risk_per_trade_pct
-                    risk_per_share = abs(entry_px - sl_px)
-                    shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 10
-
-                    current_position = {
-                        "ticker": ticker,
-                        "action": decision["action"],
-                        "entry_time_est": current_est_str,
-                        "entry_price": entry_px,
-                        "sl": sl_px,
-                        "tp": tp_px,
-                        "shares": max(1, shares),
-                        "confidence": decision.get("confidence", 0.0),
-                        "reasoning": decision.get("reasoning", ""),
-                    }
-
-        return {
-            "ticker": ticker,
-            "date": date_str,
-            "gross_pnl": round(daily_gross_pnl, 2),
-            "total_commissions": round(daily_commissions, 2),
-            "net_pnl": round(daily_gross_pnl - daily_commissions, 2),
-            "total_trades": len(trade_logs),
-            "trade_logs": trade_logs,
-        }
+    return {
+        "ticker": pos.symbol,
+        "action": pos.action,
+        "entry_time": pos.entry_time,
+        "entry_price": round(pos.entry_price, 2),
+        "exit_time": ts_str,
+        "exit_price": round(exit_price, 2),
+        "shares": pos.shares,
+        "gross_pnl": round(gross_pnl, 2),
+        "commission": round(commission, 2),
+        "pnl": round(net_pnl, 2),
+        "result": result,
+        "exit_reason": exit_reason,
+        "reasoning": pos.reasoning,
+    }

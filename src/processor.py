@@ -1,67 +1,61 @@
-# src/processor.py
+"""DataProcessor: מנוע עיבוד טכני דטרמיניסטי ב-RAM (Zero Disk I/O).
+
+משרת במקביל את סוכני ה-AI (JSON Payloads) ואת גרפי ה-Plotly ב-UI.
+"""
+
 from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
 
 class DataProcessor:
-  """מעבד נתונים טכני וחישובי ב-RAM עם תמיכה ברמות תוך-יומיות ושרשור מתודות."""
+  """מעבד נתונים מתמטי ומבני לחילוץ אינדיקטורים ורמות שוק."""
 
   def __init__(self, df: pd.DataFrame):
     self.df = df.copy()
     if not self.df.empty:
-      self._validate_and_clean()
+      self._sanitize()
 
-  def _validate_and_clean(self) -> None:
-      """ניקוי נתונים, המרת טיפוסים ומילוי פערי דקות (Forward Fill)."""
-      required = ["open", "high", "low", "close", "volume"]
-      for col in required:
-          if col in self.df.columns:
-              self.df[col] = pd.to_numeric(self.df[col], errors="coerce")
-      if "timestamp" in self.df.columns:
-          self.df["timestamp"] = pd.to_datetime(self.df["timestamp"], utc=True)
-          self.df = self.df.sort_values("timestamp").reset_index(drop=True)
+  def _sanitize(self) -> None:
+    """ניקוי והמרת טיפוסי עמודות OHLCV וזמנים."""
+    for col in ["open", "high", "low", "close", "volume"]:
+      if col in self.df.columns:
+        self.df[col] = pd.to_numeric(self.df[col], errors="coerce")
+    if "timestamp" in self.df.columns:
+      self.df["timestamp"] = pd.to_datetime(self.df["timestamp"])
+      self.df = self.df.sort_values("timestamp").reset_index(drop=True)
 
-          # אם מדובר ברצף דקתי, נמלא חורים ללא מסחר במחיר הקודם
-          if len(self.df) > 1 and "volume" in self.df.columns:
-              self.df["close"] = self.df["close"].ffill()
-              self.df["open"] = self.df["open"].fillna(self.df["close"])
-              self.df["high"] = self.df["high"].fillna(self.df["close"])
-              self.df["low"] = self.df["low"].fillna(self.df["close"])
-              self.df["volume"] = self.df["volume"].fillna(0)
-
-  def add_moving_averages(self, spans: List[int] = [20, 50], sma_spans: List[int] = [150]) -> "DataProcessor":
-    """חישוב EMA ו-SMA."""
-    for span in spans:
-      if len(self.df) >= span and span > 0:
-        self.df[f"ema_{span}"] = (
-            self.df["close"].ewm(span=span, adjust=False).mean()
-        )
-    for span in sma_spans:
-      if len(self.df) >= span and span > 0:
-        self.df[f"sma_{span}"] = (
-            self.df["close"].rolling(window=span).mean()
+  # =========================================================================
+  # 1. CORE MATH & TECHNICAL INDICATORS (Method Chaining)
+  # =========================================================================
+  def add_moving_averages(
+      self,
+      sma_spans: Optional[List[int]] = None,
+      ema_spans: Optional[List[int]] = None,
+  ) -> "DataProcessor":
+    """חישוב ממוצעים נעים פשוטים ומעריכיים."""
+    for s in sma_spans or []:
+      if len(self.df) >= s and s > 0:
+        self.df[f"sma_{s}"] = self.df["close"].rolling(window=s).mean()
+    for e in ema_spans or []:
+      if len(self.df) >= e and e > 0:
+        self.df[f"ema_{e}"] = (
+            self.df["close"].ewm(span=e, adjust=False).mean()
         )
     return self
 
   def add_vwap(self) -> "DataProcessor":
-      """חישוב VWAP יומי מדויק המאופס בפתיחת המסחר (13:30 UTC / 09:30 EST)."""
-      if self.df.empty:
-          return self
-
-      df_calc = self.df.copy()
-      typical_price = (df_calc["high"] + df_calc["low"] + df_calc["close"]) / 3
-
-      # איפוס מצטבר לפי יום מסחר
-      cum_vol = df_calc["volume"].cumsum()
-      cum_pv = (typical_price * df_calc["volume"]).cumsum()
-
-      self.df["vwap"] = cum_pv / cum_vol.replace(0, np.nan)
-      self.df["vwap"] = self.df["vwap"].ffill().fillna(self.df["close"])
-      return self
+    """חישוב VWAP תוך-יומי מצטבר."""
+    if not self.df.empty:
+      tp = (self.df["high"] + self.df["low"] + self.df["close"]) / 3
+      cum_vol = self.df["volume"].cumsum()
+      self.df["vwap"] = (tp * self.df["volume"]).cumsum() / cum_vol.replace(
+          0, np.nan
+      )
+    return self
 
   def add_rvol(self, window: int = 20) -> "DataProcessor":
-    """חישוב נפח יחסי (RVOL)."""
+    """חישוב נפח מסחר יחסי (Relative Volume)."""
     if len(self.df) >= window:
       vol_mean = self.df["volume"].rolling(window=window).mean()
       self.df["rvol"] = self.df["volume"] / vol_mean.replace(0, np.nan)
@@ -70,97 +64,118 @@ class DataProcessor:
     return self
 
   def add_atr(self, window: int = 14) -> "DataProcessor":
-    """חישוב תנודתיות ATR."""
+    """חישוב מדד תנודתיות Average True Range."""
     if len(self.df) >= window:
-      high_low = self.df["high"] - self.df["low"]
-      high_prev = (self.df["high"] - self.df["close"].shift(1)).abs()
-      low_prev = (self.df["low"] - self.df["close"].shift(1)).abs()
-      tr = pd.concat([high_low, high_prev, low_prev], axis=1).max(axis=1)
+      hl = self.df["high"] - self.df["low"]
+      hp = (self.df["high"] - self.df["close"].shift(1)).abs()
+      lp = (self.df["low"] - self.df["close"].shift(1)).abs()
+      tr = pd.concat([hl, hp, lp], axis=1).max(axis=1)
       self.df["atr"] = tr.rolling(window=window).mean()
     else:
       self.df["atr"] = 1.0
     return self
 
-  def add_intraday_pivots(self, left_bars: int = 3, right_bars: int = 3) -> "DataProcessor":
-    """זיהוי נקודות Pivot High ו-Pivot Low תוך-יומיות."""
+  def add_rsi(self, window: int = 14) -> "DataProcessor":
+    """חישוב Relative Strength Index."""
+    if len(self.df) >= window:
+      delta = self.df["close"].diff()
+      gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+      loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+      rs = gain / loss.replace(0, np.nan)
+      self.df["rsi"] = 100 - (100 / (1 + rs))
+    return self
+
+  def add_pivots_and_zones(
+      self, left_bars: int = 5, right_bars: int = 5
+  ) -> "DataProcessor":
+    """זיהוי Pivot High/Low וגזירת רמות תמיכה והתנגדות קרובות."""
+    n = len(self.df)
     self.df["is_pivot_high"] = False
     self.df["is_pivot_low"] = False
     self.df["pivot_high_price"] = np.nan
     self.df["pivot_low_price"] = np.nan
 
-    highs = self.df["high"].values
-    lows = self.df["low"].values
-    n = len(self.df)
+    if n > left_bars + right_bars:
+      highs = self.df["high"].values
+      lows = self.df["low"].values
+      for i in range(left_bars, n - right_bars):
+        if (highs[i] > highs[i - left_bars : i]).all() and (
+            highs[i] >= highs[i + 1 : i + right_bars + 1]
+        ).all():
+          self.df.at[i, "is_pivot_high"] = True
+          self.df.at[i, "pivot_high_price"] = highs[i]
 
-    if n <= left_bars + right_bars:
-      return self
+        if (lows[i] < lows[i - left_bars : i]).all() and (
+            lows[i] <= lows[i + 1 : i + right_bars + 1]
+        ).all():
+          self.df.at[i, "is_pivot_low"] = True
+          self.df.at[i, "pivot_low_price"] = lows[i]
 
-    for i in range(left_bars, n - right_bars):
-      current_high = highs[i]
-      if (current_high > highs[i - left_bars : i]).all() and (
-          current_high >= highs[i + 1 : i + right_bars + 1]
-      ).all():
-        self.df.at[i, "is_pivot_high"] = True
-        self.df.at[i, "pivot_high_price"] = current_high
-
-      current_low = lows[i]
-      if (current_low < lows[i - left_bars : i]).all() and (
-          current_low <= lows[i + 1 : i + right_bars + 1]
-      ).all():
-        self.df.at[i, "is_pivot_low"] = True
-        self.df.at[i, "pivot_low_price"] = current_low
-
-    return self
-
-  def add_supply_demand_zones(self) -> "DataProcessor":
-      """חישוב רמות תמיכה והתנגדות מקומיות מתוך חלון ה-RAM הנוכחי בלבד."""
-      if self.df.empty:
-        return self
-
-      current_price = float(self.df["close"].iloc[-1])
-
-      # 1. שליפת פיבוטים שאותרו
+    # חילוץ רמות S/R הקרובות למחיר הנוכחי
+    if not self.df.empty:
+      cp = float(self.df["close"].iloc[-1])
       p_highs = self.df.loc[
           self.df["is_pivot_high"], "pivot_high_price"
       ].dropna()
       p_lows = self.df.loc[self.df["is_pivot_low"], "pivot_low_price"].dropna()
 
-      res_candidates = p_highs[p_highs > current_price]
-      sup_candidates = p_lows[p_lows < current_price]
+      res_above = p_highs[p_highs > cp]
+      nearest_res = (
+          res_above.min()
+          if not res_above.empty
+          else (
+              p_highs.iloc[-1]
+              if not p_highs.empty
+              else float(self.df["high"].tail(30).max())
+          )
+      )
 
-      # 2. אם אין פיבוטים קרובים - נגזרת של 15 הנרות האחרונים ב-RAM בלבד
-      if not res_candidates.empty:
-        nearest_resistance = float(res_candidates.min())
-      else:
-        recent_high = float(self.df["high"].tail(15).max())
-        nearest_resistance = (
-            recent_high if recent_high > current_price else current_price * 1.002
-        )
+      sup_below = p_lows[p_lows < cp]
+      nearest_sup = (
+          sup_below.max()
+          if not sup_below.empty
+          else (
+              p_lows.iloc[-1]
+              if not p_lows.empty
+              else float(self.df["low"].tail(30).min())
+          )
+      )
 
-      if not sup_candidates.empty:
-        nearest_support = float(sup_candidates.max())
-      else:
-        recent_low = float(self.df["low"].tail(15).min())
-        nearest_support = (
-            recent_low if recent_low < current_price else current_price * 0.998
-        )
+      self.df["nearest_resistance"] = nearest_res
+      self.df["nearest_support"] = nearest_sup
+    return self
 
-      self.df["nearest_resistance"] = round(nearest_resistance, 2)
-      self.df["nearest_support"] = round(nearest_support, 2)
-      return self
+  # תאימות לאחור לקריאות בודדות
+  def add_pivots(
+      self, left_bars: int = 5, right_bars: int = 5
+  ) -> "DataProcessor":
+    return self.add_pivots_and_zones(
+        left_bars=left_bars, right_bars=right_bars
+    )
 
-  def calculate_indicators(self, config: Optional[Dict[str, Any]] = None) -> "DataProcessor":
-    """הפעלת כל החישובים הטכניים והחזרת self לשרשור מתודות."""
+  def add_supply_demand_zones(self) -> "DataProcessor":
+    return self
+
+  # =========================================================================
+  # 2. UI / PLOTLY / STREAMLIT CONNECTOR
+  # =========================================================================
+  def calculate_indicators(
+      self, config: Optional[Dict[str, Any]] = None
+  ) -> pd.DataFrame:
+    """מתודה מרכזית לדפי Streamlit ו-Plotly (מחזירה תמיד pd.DataFrame)."""
     if self.df.empty:
-      return self
+      return self.df
 
     cfg = config or {}
 
+    # ממוצעים
+    sma_spans = (
+        cfg.get("sma_spans", [150]) if cfg.get("use_sma", True) else []
+    )
     ema_spans = (
         cfg.get("ema_spans", [20, 50]) if cfg.get("use_ema", True) else []
     )
-    sma_spans = cfg.get("sma_spans", [150]) if cfg.get("use_sma", True) else []
-    self.add_moving_averages(spans=ema_spans, sma_spans=sma_spans)
+    self.add_moving_averages(sma_spans=sma_spans, ema_spans=ema_spans)
 
     if cfg.get("use_vwap", True):
       self.add_vwap()
@@ -168,76 +183,182 @@ class DataProcessor:
       self.add_rvol(window=cfg.get("rvol_window", 20))
     if cfg.get("use_atr", True):
       self.add_atr(window=cfg.get("atr_window", 14))
+    if cfg.get("use_rsi", False):
+      self.add_rsi(window=cfg.get("rsi_window", 14))
 
-    l_bars = cfg.get("pivot_left_bars", 3)
-    r_bars = cfg.get("pivot_right_bars", 3)
-    self.add_intraday_pivots(left_bars=l_bars, right_bars=r_bars)
-    self.add_supply_demand_zones()
+    if (
+        cfg.get("use_pivots", True)
+        or cfg.get("use_zones", True)
+        or cfg.get("use_sr", True)
+    ):
+      l_bars = cfg.get("pivot_left_bars", 5)
+      r_bars = cfg.get("pivot_right_bars", 5)
+      self.add_pivots_and_zones(left_bars=l_bars, right_bars=r_bars)
 
-    return self
+    return self.df
 
+  # =========================================================================
+  # 3. AI AGENT DEDICATED PAYLOADS & BUNDLER
+  # =========================================================================
   def get_latest_summary(self) -> Dict[str, Any]:
-    """הפקת סיכום תמציתי עבור סוכני ה-AI כולל מרחקים יחסיים מרמות מפתח."""
+    """סיכום כללי של הנר האחרון (משמש כ-Fallback או לתצוגת JSON מהירה)."""
     if self.df.empty:
       return {}
 
     last = self.df.iloc[-1]
-    close_px = float(last["close"])
+    cp = float(last["close"])
 
-    trend_status = "NEUTRAL"
-    if "ema_20" in self.df.columns and "ema_50" in self.df.columns:
-      trend_status = (
-          "BULLISH" if last["ema_20"] > last["ema_50"] else "BEARISH"
-      )
-    elif "sma_150" in self.df.columns and pd.notna(last["sma_150"]):
-      trend_status = "BULLISH" if close_px > last["sma_150"] else "BEARISH"
+    trend = "NEUTRAL"
+    if "sma_150" in self.df.columns and pd.notna(last["sma_150"]):
+      trend = "BULLISH" if cp > last["sma_150"] else "BEARISH"
+    elif "ema_20" in self.df.columns and "ema_50" in self.df.columns:
+      trend = "BULLISH" if last["ema_20"] > last["ema_50"] else "BEARISH"
 
-    summary = {
+    summary: Dict[str, Any] = {
         "timestamp": str(last.get("timestamp", "")),
-        "close": close_px,
-        "trend_regime": trend_status,
+        "close": cp,
+        "trend_regime": trend,
     }
 
     for col in [
         "vwap",
         "rvol",
         "atr",
-        "ema_20",
-        "ema_50",
-        "sma_150",
+        "rsi",
         "nearest_support",
         "nearest_resistance",
     ]:
       if col in self.df.columns and pd.notna(last[col]):
         summary[col] = float(round(last[col], 2))
 
-    if "nearest_support" in summary and summary["nearest_support"] > 0:
+    for col in self.df.columns:
+      if col.startswith(("ema_", "sma_")) and pd.notna(last[col]):
+        summary[col] = float(round(last[col], 2))
+
+    if summary.get("nearest_support", 0) > 0:
       summary["dist_to_support_pct"] = round(
-          ((close_px - summary["nearest_support"]) / close_px) * 100, 2
+          ((cp - summary["nearest_support"]) / cp) * 100, 2
       )
-    if "nearest_resistance" in summary and summary["nearest_resistance"] > 0:
+    if summary.get("nearest_resistance", 0) > 0:
       summary["dist_to_resistance_pct"] = round(
-          ((summary["nearest_resistance"] - close_px) / close_px) * 100, 2
+          ((summary["nearest_resistance"] - cp) / cp) * 100, 2
       )
 
     return summary
 
   @staticmethod
-  def resample_1m_to_15m(df_1m: pd.DataFrame) -> pd.DataFrame:
-      """דחיסת נרות דקה לנרות 15 דקות עדכניים ב-RAM עבור סוכן המבנה."""
-      if df_1m.empty or len(df_1m) < 15:
-          return df_1m
+  def build_multi_agent_bundle(
+      raw_dfs: Dict[str, pd.DataFrame], features_cfg: Dict[str, Any]
+  ) -> Dict[str, Dict[str, Any]]:
+    """חבילת נתונים מרכזית המפצלת ומזריקה לכל סוכן אך ורק את הנתונים שלו."""
+    bundle: Dict[str, Dict[str, Any]] = {
+        "macro": {},
+        "structure": {},
+        "trigger": {},
+    }
 
-      df = df_1m.copy()
-      df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-      df = df.set_index("timestamp")
+    # 1. Macro (Daily / 4H)
+    m_cfg = features_cfg.get("macro", {})
+    m_tf = m_cfg.get("timeframe", "1D")
+    df_m = raw_dfs.get(m_tf, pd.DataFrame())
+    if not df_m.empty:
+      proc_m = DataProcessor(df_m)
+      smas = m_cfg.get("sma_spans", [150])
+      emas = m_cfg.get("ema_spans", [])
+      proc_m.add_moving_averages(sma_spans=smas, ema_spans=emas)
+      if m_cfg.get("use_sr", True):
+        proc_m.add_pivots_and_zones(5, 5)
 
-      resampled = df.resample("15min").agg({
-          "open": "first",
-          "high": "max",
-          "low": "min",
-          "close": "last",
-          "volume": "sum"
-      }).dropna().reset_index()
+      last_m = proc_m.df.iloc[-1]
+      cp_m = float(last_m["close"])
+      trend_ref = (
+          last_m.get(f"sma_{smas[0]}")
+          if smas
+          else (last_m.get(f"ema_{emas[0]}") if emas else None)
+      )
 
-      return resampled
+      bundle["macro"] = {
+          "timestamp": str(last_m.get("timestamp", "")),
+          "timeframe": m_tf,
+          "close": cp_m,
+          "trend_regime": (
+              "BULLISH"
+              if pd.notna(trend_ref) and cp_m > trend_ref
+              else ("BEARISH" if pd.notna(trend_ref) else "NEUTRAL")
+          ),
+          "nearest_support": float(
+              round(last_m.get("nearest_support", cp_m), 2)
+          ),
+          "nearest_resistance": float(
+              round(last_m.get("nearest_resistance", cp_m), 2)
+          ),
+      }
+      if pd.notna(trend_ref):
+        bundle["macro"]["trend_line_val"] = float(round(trend_ref, 2))
+
+    # 2. Structure (15m / 1H)
+    s_cfg = features_cfg.get("structure", {})
+    s_tf = s_cfg.get("timeframe", "15m")
+    df_s = raw_dfs.get(s_tf, pd.DataFrame())
+    if not df_s.empty:
+      proc_s = DataProcessor(df_s)
+      if s_cfg.get("use_atr", True):
+        proc_s.add_atr(s_cfg.get("atr_window", 14))
+      if s_cfg.get("use_pivots", True):
+        proc_s.add_pivots_and_zones(
+            s_cfg.get("pivot_left_bars", 5), s_cfg.get("pivot_right_bars", 5)
+        )
+
+      last_s = proc_s.df.iloc[-1]
+      cp_s = float(last_s["close"])
+      sup = float(last_s.get("nearest_support", cp_s))
+      res = float(last_s.get("nearest_resistance", cp_s))
+
+      bundle["structure"] = {
+          "timestamp": str(last_s.get("timestamp", "")),
+          "timeframe": s_tf,
+          "close": cp_s,
+          "nearest_support": sup,
+          "nearest_resistance": res,
+          "dist_to_support_pct": round(((cp_s - sup) / cp_s) * 100, 2)
+          if sup > 0
+          else 0.0,
+          "dist_to_resistance_pct": round(((res - cp_s) / cp_s) * 100, 2)
+          if res > 0
+          else 0.0,
+          "atr": float(round(last_s.get("atr", 1.0), 2)),
+      }
+
+    # 3. Trigger (1m / 5m)
+    t_cfg = features_cfg.get("trigger", {})
+    t_tf = t_cfg.get("timeframe", "1m")
+    df_t = raw_dfs.get(t_tf, pd.DataFrame())
+    if not df_t.empty:
+      proc_t = DataProcessor(df_t)
+      if t_cfg.get("use_vwap", True):
+        proc_t.add_vwap()
+      if t_cfg.get("use_rvol", True):
+        proc_t.add_rvol(t_cfg.get("rvol_window", 20))
+      emas_t = t_cfg.get("ema_spans", [20, 50])
+      proc_t.add_moving_averages(ema_spans=emas_t).add_atr(14)
+
+      last_t = proc_t.df.iloc[-1]
+      cp_t = float(last_t["close"])
+      vwap_v = float(last_t.get("vwap", cp_t))
+
+      bundle["trigger"] = {
+          "timestamp": str(last_t.get("timestamp", "")),
+          "timeframe": t_tf,
+          "close": cp_t,
+          "vwap": round(vwap_v, 2),
+          "price_vs_vwap": "ABOVE" if cp_t >= vwap_v else "BELOW",
+          "rvol": float(round(last_t.get("rvol", 1.0), 2)),
+          "atr": float(round(last_t.get("atr", 0.5), 2)),
+      }
+      for e in emas_t:
+        if f"ema_{e}" in proc_t.df.columns:
+          bundle["trigger"][f"ema_{e}"] = float(
+              round(last_t.get(f"ema_{e}", cp_t), 2)
+          )
+
+    return bundle

@@ -133,31 +133,42 @@ class LiveIEXTraderEngine:
           f"Failed to persist candle to SQLite for {candle.get('ticker')}: {e}"
       )
 
-  def _log_decision_to_db(self, symbol: str, decision: dict) -> None:
-    """שמירת החלטת התזמורת למסד הנתונים להצגה ב-Streamlit."""
-    try:
-      with sqlite3.connect(self.config.DB_PATH) as conn:
-        conn.execute(
-            """
-                    INSERT INTO ai_decisions (
-                        timestamp, symbol, action, confidence, 
-                        entry_price, stop_loss, take_profit, reasoning
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-            (
-                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                symbol,
-                decision.get("action", "HOLD"),
-                decision.get("confidence", 0.0),
-                decision.get("entry_price", 0.0),
-                decision.get("stop_loss", 0.0),
-                decision.get("take_profit", 0.0),
-                decision.get("reasoning", ""),
-            ),
-        )
-    except Exception as e:
-      logger.error(f"Failed to log decision to DB for {symbol}: {e}")
+  def _log_decision_to_db(self, symbol: str, decision: dict, status: str = "SUCCESS", error_msg: str = None) -> None:
+      """שמירה מדויקת של החלטות ושגיאות AI ל-SQLite."""
+      with sqlite3.connect(self.db_path) as conn:
+          conn.execute("""
+              CREATE TABLE IF NOT EXISTS ai_decisions (
+                  timestamp DATETIME,
+                  symbol TEXT,
+                  action TEXT,
+                  confidence REAL,
+                  entry_price REAL,
+                  stop_loss REAL,
+                  take_profit REAL,
+                  reasoning TEXT,
+                  status TEXT DEFAULT 'SUCCESS',
+                  error_msg TEXT
+              );
+          """)
+          conn.execute("""
+              INSERT INTO ai_decisions (
+                  timestamp, symbol, action, confidence, 
+                  entry_price, stop_loss, take_profit, 
+                  reasoning, status, error_msg
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """, (
+              decision.get("timestamp"),
+              symbol,
+              decision.get("action", "HOLD"),
+              decision.get("confidence", 0.0),
+              decision.get("entry_price", 0.0),
+              decision.get("stop_loss", 0.0),
+              decision.get("take_profit", 0.0),
+              decision.get("reasoning", ""),
+              status,
+              error_msg
+          ))
 
   async def on_minute_bar(self, bar) -> None:
       symbol = bar.symbol

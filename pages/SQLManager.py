@@ -156,9 +156,10 @@ with tab_chart:
             "use_zones": show_zones
         }
 
+        # --- אחרי התיקון ---
         processor = DataProcessor(df_chart)
         processor.calculate_indicators(proc_config)
-        enriched_df = processor.df
+        enriched_df = processor.df  # שולף ישירות את ה-DataFrame המעובד עבור Plotly
 
         fig = render_candlestick_chart(
             enriched_df,
