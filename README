@@ -1,0 +1,33 @@
+# 📘 AI Multi-Agent Quantitative Trading Terminal
+## מסמך ארכיטקטורה, מפרט פונקציות וזרימות עבודה (System Reference)
+
+---
+
+## 1. מבנה הקבצים והתיקיות בפרויקט
+
+```text
+trading_agent_project/
+│
+├── config.py                 # ניהול מפתחות API, הגדרות חשבון ורשימת מניות (WATCHLIST)
+├── main.py                   # נקודת כניסה ראשית והרצת ה-Pipeline השלם
+├── app.py                    # דף הבית הראשי של Streamlit
+│
+├── pages/                    # עמודי ממשק המשתמש (Streamlit Multi-Page)
+│   ├── 1_📡_Live_Trading.py  # דשבורד מסחר חי, פוזיציות ויומן החלטות AI
+│   ├── 2_🔍_SQL_Explorer.py  # מעבדת חקר נתונים, גרף Plotly ואימות אינדיקטורים
+│   └── 3_🧪_Backtesting.py   # מנוע סימולציה היסטורי נר-אחר-נר
+│
+├── src/                      # מנועים דטרמיניסטיים (לוגיקה, נתונים וסיכונים)
+│   ├── data_loader.py        # ניהול I/O מול Alpaca ומסד הנתונים SQLite
+│   ├── processor.py          # עיבוד וקטורי של אינדיקטורים מתמטיים ב-RAM
+│   ├── live_stream_engine.py # האזנה ל-WebSocket (Alpaca IEX) ועדכון בזמן אמת
+│   ├── replay_engine.py      # מנוע סימולציה לשחזור ימי עבר
+│   └── risk_manager.py       # אכיפת חוקי ברזל קשיחים (Hard Risk Guard)
+│
+└── agents/                   # שכבת תזמורת סוכני ה-AI
+    ├── macro_agent.py        # סוכן מגמת מאקרו ורמות יומיות (Daily / 4H)
+    ├── structure_agent.py    # סוכן מבנה שוק והיצע/ביקוש (1H / 15m)
+    ├── trigger_agent.py      # סוכן טריגר תוך-יומי ונפח (5m / 1m)
+    └── orchestrator.py       # מנצח התזמורת (Waterfall & TradeSignal JSON)
+
+
