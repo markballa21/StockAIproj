@@ -19,6 +19,8 @@ from agents.orchestrator import TradingOrchestrator
 from config import Config
 from src.data_loader import DataLoader
 from src.processor import DataProcessor
+from src.executor import AlpacaExecutor
+from src.risk_guard import HardRiskGuard # או מודול ה-Risk
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +40,8 @@ class LiveIEXTraderEngine:
   def __init__(self, symbols: Optional[List[str]] = None):
     self.config = Config()
     self.symbols = symbols or self.config.WATCHLIST[:3]
+    self.executor = AlpacaExecutor()
+    self.risk_guard = HardRiskGuard()
 
     # 1. אתחול מנהל נתונים ותזמורת הסוכנים
     self.loader = DataLoader(
@@ -314,6 +318,14 @@ class LiveIEXTraderEngine:
                   f"🎯 LIVE SIGNAL: {action} {symbol} @ ${entry_px:.2f} | "
                   f"SL: ${sl_px:.2f} | TP: ${tp_px:.2f}"
               )
+
+              if self.risk_guard.can_open_trade():
+                  # שיגור פקודת ה-Bracket לחשבון ה-Paper
+                  order = self.executor.submit_bracket_order(decision)
+                  if order:
+                      self.risk_guard.register_new_trade()
+              else:
+                  logger.warning(f"🛑 איתות ל-{symbol} נחסם על ידי Hard Risk Guard!")
 
       except Exception as e:
           logger.warning(
