@@ -1,48 +1,33 @@
 # agents/macro_agent.py
+import json
 from typing import Any, Dict
-from google import genai
-from google.genai import types
-
+import anthropic
 from agents.schemas import MacroDecision
 
-
 class MacroAgent:
-    def __init__(self, client: genai.Client, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, client: anthropic.Anthropic, model_name: str = "claude-haiku-4-5-20251001"):
         self.client = client
         self.model_name = model_name
 
     def analyze(self, symbol: str, macro_data: Dict[str, Any], custom_rules: str = "") -> MacroDecision:
         prompt = f"""
-        אתה סוכן מאקרו בכיר (Macro Trend Analyst) למסחר במניות.
-        תפקידך לנתח את מגמת העל של הנכס על פי נרות יומיים ו-4 שעתיים בלבד.
+אתה סוכן מאקרו בכיר למסחר במניות. עליך להחזיר תשובה בפורמט JSON בלבד, ללא מלל נוסף.
+מבנה ה-JSON הנדרש:
+{{"bias": "BULLISH" | "BEARISH" | "NEUTRAL", "confidence": float, "reasoning": "string"}}
 
-        נכס: {symbol}
-        נתוני מאקרו:
-        - מחיר סגירה אחרון: {macro_data.get('close')}
-        - מגמה טכנית (SMA 150/EMA): {macro_data.get('trend_regime', 'UNKNOWN')}
-        - תמיכה שבועית/יומית: {macro_data.get('nearest_support')}
-        - התנגדות שבועית/יומית: {macro_data.get('nearest_resistance')}
-        - מרחק מתמיכה (%): {macro_data.get('dist_to_support_pct', 0.0)}%
-        - מרחק מהתנגדות (%): {macro_data.get('dist_to_resistance_pct', 0.0)}%
-
-        הנחיות וחוקים נוספים:
-        {custom_rules or 'אשר לונג רק אם המחיר מעל הממוצעים ומחזיק תמיכה. אשר שורט רק במגמה יורדת.'}
-        """
-
+נכס: {symbol}
+נתונים יומיים: {json.dumps(macro_data)}
+חוקים מיוחדים: {custom_rules}
+"""
         try:
-            response = self.client.models.generate_content(
+            response = self.client.messages.create(
                 model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=MacroDecision,
-                    temperature=0.1
-                )
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}]
             )
-            return MacroDecision.model_validate_json(response.text)
+            raw_text = response.content[0].text.strip()
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("```")[1].replace("json", "").strip()
+            return MacroDecision.model_validate_json(raw_text)
         except Exception as e:
-            return MacroDecision(
-                bias="NEUTRAL",
-                confidence=0.0,
-                reasoning=f"Macro agent error: {str(e)}"
-            )
+            return MacroDecision(bias="NEUTRAL", confidence=0.0, reasoning=f"Claude Macro error: {str(e)}")

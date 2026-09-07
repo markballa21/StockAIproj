@@ -18,7 +18,7 @@ class Config:
 
     # Model Names
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-    CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet")
+    CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
     # Database & Storage Paths
     DB_PATH: str = os.getenv("DB_PATH", "market_data.db")

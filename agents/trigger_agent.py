@@ -1,50 +1,35 @@
 # agents/trigger_agent.py
+import json
 from typing import Any, Dict
-from google import genai
-from google.genai import types
-
+import anthropic
 from agents.schemas import TriggerDecision
 
-
 class TriggerAgent:
-    def __init__(self, client: genai.Client, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, client: anthropic.Anthropic, model_name: str = "claude-haiku-4-5-20251001"):
         self.client = client
         self.model_name = model_name
 
     def analyze(self, symbol: str, bias: str, trigger_data: Dict[str, Any], custom_rules: str = "") -> TriggerDecision:
         prompt = f"""
-        אתה סוכן תזמון וטריגרים למסחר תוך-יומי מהיר (Trigger & Execution Agent).
-        כיוון מאושר: {bias}
-        נכס: {symbol}
+אתה סוכן טריגר וביצוע (1m/5m). החזר JSON בלבד:
+{{"trigger_confirmed": bool, "entry_price": float, "timing_confidence": float, "reasoning": "string"}}
 
-        נתונים מהירים (1m / 5m):
-        - מחיר נוכחי: {trigger_data.get('close')}
-        - VWAP: {trigger_data.get('vwap')}
-        - נפח יחסי (RVOL): {trigger_data.get('rvol')}
-        - EMA 20: {trigger_data.get('ema_20')}
-        - EMA 50: {trigger_data.get('ema_50')}
-
-        חוקי כניסה:
-        1. ל-BUY: מחיר מעל VWAP, RVOL >= 1.2, ומגמה חיובית (EMA 20 > EMA 50 או Close > EMA 20).
-        2. ל-SELL: מחיר מתחת ל-VWAP, RVOL >= 1.2, ומגמה שלילית (EMA 20 < EMA 50 או Close < EMA 20).
-        {custom_rules}
-        """
-
+נכס: {symbol} | כיוון: {bias}
+נתוני טריגר: {json.dumps(trigger_data)}
+חוקים: {custom_rules}
+"""
         try:
-            response = self.client.models.generate_content(
+            response = self.client.messages.create(
                 model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=TriggerDecision,
-                    temperature=0.1
-                )
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}]
             )
-            return TriggerDecision.model_validate_json(response.text)
+            raw_text = response.content[0].text.strip()
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("```")[1].replace("json", "").strip()
+            return TriggerDecision.model_validate_json(raw_text)
         except Exception as e:
             return TriggerDecision(
-                trigger_confirmed=False,
-                entry_price=0.0,
-                timing_confidence=0.0,
-                reasoning=f"Trigger agent error: {str(e)}"
+                trigger_confirmed=False, entry_price=0.0,
+                timing_confidence=0.0, reasoning=f"Claude Trigger error: {str(e)}"
             )

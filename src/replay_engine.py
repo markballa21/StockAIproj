@@ -167,7 +167,15 @@ class MarketReplayEngine:
       # -------------------------------------------------------------
       # ה. פתיחת פוזיציה במידה והתקבל אישור BUY / SELL
       # -------------------------------------------------------------
-      action = decision.get("action")
+      # לפני התיקון:
+      # action = decision.get("action")
+
+      # אחרי התיקון:
+      decision = self.orchestrator.evaluate_symbol(symbol=ticker, data_bundle=data_bundle)
+      if not decision or not isinstance(decision, dict):
+          decision = {"action": "HOLD", "reasoning": "Invalid or empty orchestrator response"}
+
+      action = decision.get("action", "HOLD")
       if action in ["BUY", "SELL"]:
         entry_price = float(decision.get("entry_price", current_candle["close"]))
         stop_loss = float(decision.get("stop_loss", 0.0))
