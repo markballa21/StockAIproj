@@ -139,7 +139,7 @@ class LiveIEXTraderEngine:
 
   def _log_decision_to_db(self, symbol: str, decision: dict, status: str = "SUCCESS", error_msg: str = None) -> None:
       """שמירה מדויקת של החלטות ושגיאות AI ל-SQLite."""
-      with sqlite3.connect(self.db_path) as conn:
+      with sqlite3.connect(self.config.DB_PATH) as conn:
           conn.execute("""
               CREATE TABLE IF NOT EXISTS ai_decisions (
                   timestamp DATETIME,
@@ -359,8 +359,6 @@ class LiveIEXTraderEngine:
               return res[0] == "true" if res else True
       except Exception:
           return True
-
-
 
 
 if __name__ == "__main__":

@@ -201,50 +201,46 @@ class DataProcessor:
   # 3. AI AGENT DEDICATED PAYLOADS & BUNDLER
   # =========================================================================
   def get_latest_summary(self) -> Dict[str, Any]:
-    """סיכום כללי של הנר האחרון (משמש כ-Fallback או לתצוגת JSON מהירה)."""
-    if self.df.empty:
-      return {}
+      """הפקת Payload מתמטי קל משקל עבור סוכני ה-AI וה-Pre-Filters."""
+      if self.df.empty:
+          return {}
 
-    last = self.df.iloc[-1]
-    cp = float(last["close"])
+      last = self.df.iloc[-1]
+      close_px = float(last["close"])
 
-    trend = "NEUTRAL"
-    if "sma_150" in self.df.columns and pd.notna(last["sma_150"]):
-      trend = "BULLISH" if cp > last["sma_150"] else "BEARISH"
-    elif "ema_20" in self.df.columns and "ema_50" in self.df.columns:
-      trend = "BULLISH" if last["ema_20"] > last["ema_50"] else "BEARISH"
+      trend_status = "NEUTRAL"
+      if "sma_150" in self.df.columns and pd.notna(last["sma_150"]):
+          trend_status = "BULLISH" if close_px > last["sma_150"] else "BEARISH"
+      elif "ema_20" in self.df.columns and "ema_50" in self.df.columns:
+          trend_status = "BULLISH" if last["ema_20"] > last["ema_50"] else "BEARISH"
 
-    summary: Dict[str, Any] = {
-        "timestamp": str(last.get("timestamp", "")),
-        "close": cp,
-        "trend_regime": trend,
-    }
+      summary = {
+          "timestamp": str(last.get("timestamp", "")),
+          "close": close_px,
+          "trend_regime": trend_status,
+      }
 
-    for col in [
-        "vwap",
-        "rvol",
-        "atr",
-        "rsi",
-        "nearest_support",
-        "nearest_resistance",
-    ]:
-      if col in self.df.columns and pd.notna(last[col]):
-        summary[col] = float(round(last[col], 2))
+      # חילוץ אינדיקטורים קיימים
+      for key in ["vwap", "rvol", "atr", "ema_20", "ema_50", "sma_150", "nearest_support", "nearest_resistance"]:
+          if key in self.df.columns and pd.notna(last[key]):
+              summary[key] = float(round(last[key], 2))
 
-    for col in self.df.columns:
-      if col.startswith(("ema_", "sma_")) and pd.notna(last[col]):
-        summary[col] = float(round(last[col], 2))
+      # מרחקים יחסיים באחוזים מרמות תמיכה/התנגדות
+      if "nearest_support" in summary and summary["nearest_support"] > 0:
+          summary["dist_to_support_pct"] = round(((close_px - summary["nearest_support"]) / close_px) * 100, 2)
+      if "nearest_resistance" in summary and summary["nearest_resistance"] > 0:
+          summary["dist_to_resistance_pct"] = round(((summary["nearest_resistance"] - close_px) / close_px) * 100, 2)
 
-    if summary.get("nearest_support", 0) > 0:
-      summary["dist_to_support_pct"] = round(
-          ((cp - summary["nearest_support"]) / cp) * 100, 2
-      )
-    if summary.get("nearest_resistance", 0) > 0:
-      summary["dist_to_resistance_pct"] = round(
-          ((summary["nearest_resistance"] - cp) / cp) * 100, 2
-      )
+      # חישוב מרחק מ-VWAP מנורמל ב-ATR (דינמי לכל מניה)
+      if "vwap" in summary and "atr" in summary and summary["atr"] > 0:
+          vwap_diff = abs(close_px - summary["vwap"])
+          summary["vwap_dist_atr"] = round(vwap_diff / summary["atr"], 2)
+          summary["dist_to_vwap_pct"] = round((vwap_diff / close_px) * 100, 2)
+      else:
+          summary["vwap_dist_atr"] = 0.0
+          summary["dist_to_vwap_pct"] = 0.0
 
-    return summary
+      return summary
 
   @staticmethod
   def build_multi_agent_bundle(
