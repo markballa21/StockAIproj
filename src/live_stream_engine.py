@@ -229,9 +229,17 @@ class LiveIEXTraderEngine:
             logger.info(f"⏳ [{symbol}] Accumulating RAM buffer ({buffer_len}/15)...")
             return
 
-        # 4. חישוב נתוני 1m מהירים ב-RAM (הפרדה לשתי שורות למניעת AttributeError)
-        df_1m = pd.DataFrame(list(self.memory_buffers[symbol]))
-        proc_1m = DataProcessor(df_1m)
+        # 4. שליפת כל נרות ה-1m של יום המסחר הנוכחי מ-SQLite לחישוב VWAP תוך-יומי אמיתי
+        df_1m_today = self.loader.query_candles(
+            symbol=symbol,
+            timeframe="1m",
+            limit=390,  # מכסה עד 6.5 שעות מסחר מלאות מ-09:30
+            ascending=True,
+        )
+        if df_1m_today.empty or len(df_1m_today) < 15:
+            df_1m_today = pd.DataFrame(list(self.memory_buffers[symbol]))
+
+        proc_1m = DataProcessor(df_1m_today)
         proc_1m.calculate_indicators()
         trigger_summary = proc_1m.get_latest_summary()
 
@@ -240,7 +248,7 @@ class LiveIEXTraderEngine:
             logger.info(f"⏸️ [{symbol}] AI Evaluation paused via UI switch.")
             return
 
-        # 6. בדיקת Pre-Filter מתמטית ב-RAM
+        # 6. בדיקת Pre-Filter מתמטית ב-RAM (מכויל ל-ATR מורחב)
         passed, filter_reason = self.passes_pre_filter(trigger_summary)
         if not passed:
             logger.info(f"🤖 [{symbol}] Decision: HOLD (Confidence: 0.0) | Latency: 0.7ms | {filter_reason}")
@@ -290,10 +298,11 @@ class LiveIEXTraderEngine:
             df_15m = self.loader.query_candles(symbol=symbol, timeframe="15m", limit=60, ascending=True)
             df_1d = self.loader.query_candles(symbol=symbol, timeframe="1D", limit=120, ascending=True)
 
-            # Resampling מקומי מ-RAM אם טרם סונכרנו נרות 15m
+            # Resampling מקומי מנרות ה-1m של היום אם טרם סונכרנו נרות 15m
             if df_15m.empty:
-                df_1m_mem = pd.DataFrame(list(self.memory_buffers[symbol]))
-                df_15m = DataProcessor.resample_1m_to_15m(df_1m_mem)
+                df_1m_today = self.loader.query_candles(symbol=symbol, timeframe="1m", limit=390, ascending=True)
+                if not df_1m_today.empty:
+                    df_15m = DataProcessor.resample_1m_to_15m(df_1m_today)
 
             # חישוב תמציות מאקרו ומבנה
             if not df_1d.empty:
@@ -303,18 +312,12 @@ class LiveIEXTraderEngine:
             else:
                 macro_summary = trigger_summary
 
-            if df_15m.empty or df_15m["ticker"].iloc[0] != symbol:
-                df_1m_mem = pd.DataFrame(list(self.memory_buffers[symbol]))
-                if not df_1m_mem.empty:
-                    proc_mem = DataProcessor(df_1m_mem)
-                    proc_mem.calculate_indicators()
-                    structure_summary = proc_mem.get_latest_summary()
-                else:
-                    structure_summary = trigger_summary
-            else:
+            if not df_15m.empty:
                 proc_15m = DataProcessor(df_15m)
                 proc_15m.calculate_indicators()
                 structure_summary = proc_15m.get_latest_summary()
+            else:
+                structure_summary = trigger_summary
 
             data_bundle = {
                 "macro": macro_summary,
@@ -337,7 +340,6 @@ class LiveIEXTraderEngine:
                 f"🤖 [{symbol}] Decision: {action} (Confidence: {confidence}) | Latency: {latency_ms:.1f}ms"
             )
 
-            # הבטחת חותמת הזמן בהחלטה
             decision["timestamp"] = candle_ts
             self._log_decision_to_db(symbol, decision, candle_timestamp=candle_ts, status="SUCCESS")
 
