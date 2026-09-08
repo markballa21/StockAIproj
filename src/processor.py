@@ -45,14 +45,45 @@ class DataProcessor:
     return self
 
   def add_vwap(self) -> "DataProcessor":
-    """חישוב VWAP תוך-יומי מצטבר."""
-    if not self.df.empty:
-      tp = (self.df["high"] + self.df["low"] + self.df["close"]) / 3
-      cum_vol = self.df["volume"].cumsum()
-      self.df["vwap"] = (tp * self.df["volume"]).cumsum() / cum_vol.replace(
-          0, np.nan
-      )
-    return self
+      """חישוב VWAP תוך-יומי מצטבר המתאפס בתחילת כל יום מסחר (Session Reset)."""
+      if self.df.empty:
+          return self
+
+      df = self.df
+
+      # חילוץ תאריך לטובת איפוס יומי
+      if "timestamp" in df.columns:
+          # המרה זמנית של תאריך בלבד לקיבוץ
+          date_series = pd.to_datetime(df["timestamp"]).dt.date
+      else:
+          date_series = pd.Series(0, index=df.index)
+
+      tp = (df["high"] + df["low"] + df["close"]) / 3.0
+      pv = tp * df["volume"]
+
+      # חישוב סכום מצטבר תוך-יומי נקי כ-Series
+      cum_vol = df["volume"].groupby(date_series).cumsum().replace(0, np.nan)
+      cum_pv = pv.groupby(date_series).cumsum()
+
+      # חישוב ה-VWAP והזנתו כעמודה יחידה
+      vwap_series = cum_pv / cum_vol
+      df["vwap"] = vwap_series.ffill().fillna(df["close"])
+
+      # חישוב סטיית תקן משוקללת לנפח (VWAP StdDev & Z-Score)
+      diff_sq_vol = ((tp - df["vwap"]) ** 2) * df["volume"]
+      cum_diff_sq = diff_sq_vol.groupby(date_series).cumsum()
+      vwap_var = cum_diff_sq / cum_vol
+      vwap_std = np.sqrt(vwap_var.replace(0, np.nan)).fillna(0.01)
+      df["vwap_std"] = vwap_std
+
+      # רצועות סטיית תקן ו-Z-Score
+      df["vwap_upper_1sd"] = df["vwap"] + vwap_std
+      df["vwap_lower_1sd"] = df["vwap"] - vwap_std
+      df["vwap_upper_2sd"] = df["vwap"] + (2.0 * vwap_std)
+      df["vwap_lower_2sd"] = df["vwap"] - (2.0 * vwap_std)
+      df["vwap_z_score"] = ((df["close"] - df["vwap"]) / vwap_std).round(2)
+
+      return self
 
   def add_rvol(self, window: int = 20) -> "DataProcessor":
     """חישוב נפח מסחר יחסי (Relative Volume)."""

@@ -164,19 +164,29 @@ class LiveIEXTraderEngine:
     # -------------------------------------------------------------------------
     @staticmethod
     def passes_pre_filter(
-        summary: dict,
-        max_atr_dist: float = 1.2,
-        max_z_score: float = 2.0,
-        min_rvol: float = 1.1,
+            summary: dict,
+            max_atr_dist: float = 3.0,  # הועלה מ-1.2 ל-3.0 (מותאם ל-1m ATR)
+            max_vwap_pct: float = 0.8,  # הגנה משלימה: סטייה של עד 0.8% מהמחיר
+            min_rvol: float = 0.95,  # הותאם מ-1.1 ל-0.95 עבור פיד IEX
+            max_z_score: float = 2.5,
     ) -> Tuple[bool, str]:
-        """סינון מהיר ב-0.1ms למניעת שריפת טוקנים וקריאות API מיותרות."""
+        """סינון מתמטי מקדים ב-RAM מכויל לתנאי שוק חיים."""
+
         rvol = summary.get("rvol", 1.0)
         if rvol < min_rvol:
             return False, f"Low RVOL ({rvol:.2f} < {min_rvol})"
 
+        # מרחק מנורמל ב-ATR
         dist_atr = summary.get("dist_to_vwap_atr", 0.0)
-        if dist_atr > max_atr_dist:
-            return False, f"Extended from VWAP ({dist_atr:.2f} ATR > {max_atr_dist} ATR)"
+
+        # חישוב מרחק באחוזים מול מחיר הסגירה
+        close_px = summary.get("close", 1.0)
+        vwap_px = summary.get("vwap", close_px)
+        dist_pct = (abs(close_px - vwap_px) / close_px) * 100
+
+        # פסילה רק אם המחיר חורג גם ב-ATR וגם באחוז המרבי מה-VWAP
+        if dist_atr > max_atr_dist and dist_pct > max_vwap_pct:
+            return False, f"Extended from VWAP ({dist_atr:.2f} ATR / {dist_pct:.2f}% > {max_atr_dist} ATR)"
 
         z_score = abs(summary.get("vwap_z_score", 0.0))
         if z_score > max_z_score:
@@ -293,12 +303,18 @@ class LiveIEXTraderEngine:
             else:
                 macro_summary = trigger_summary
 
-            if not df_15m.empty:
+            if df_15m.empty or df_15m["ticker"].iloc[0] != symbol:
+                df_1m_mem = pd.DataFrame(list(self.memory_buffers[symbol]))
+                if not df_1m_mem.empty:
+                    proc_mem = DataProcessor(df_1m_mem)
+                    proc_mem.calculate_indicators()
+                    structure_summary = proc_mem.get_latest_summary()
+                else:
+                    structure_summary = trigger_summary
+            else:
                 proc_15m = DataProcessor(df_15m)
                 proc_15m.calculate_indicators()
                 structure_summary = proc_15m.get_latest_summary()
-            else:
-                structure_summary = trigger_summary
 
             data_bundle = {
                 "macro": macro_summary,
