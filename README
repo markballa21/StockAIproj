@@ -1,33 +1,66 @@
-# 📘 AI Multi-Agent Quantitative Trading Terminal
-## מסמך ארכיטקטורה, מפרט פונקציות וזרימות עבודה (System Reference)
-
----
-
-## 1. מבנה הקבצים והתיקיות בפרויקט
-
-```text
-trading_agent_project/
+StockAIproj/
 │
-├── config.py                 # ניהול מפתחות API, הגדרות חשבון ורשימת מניות (WATCHLIST)
-├── main.py                   # נקודת כניסה ראשית והרצת ה-Pipeline השלם
-├── app.py                    # דף הבית הראשי של Streamlit
+├── config.py                 # ניהול מפתחות API, הגדרות חשבון, רשימת Watchlist ופרמטרים
+├── main.py                   # נקודת כניסה ראשית והרצת ה-Pipeline
+├── app.py                    # דף הבית של ממשק Streamlit
 │
-├── pages/                    # עמודי ממשק המשתמש (Streamlit Multi-Page)
-│   ├── 1_📡_Live_Trading.py  # דשבורד מסחר חי, פוזיציות ויומן החלטות AI
-│   ├── 2_🔍_SQL_Explorer.py  # מעבדת חקר נתונים, גרף Plotly ואימות אינדיקטורים
-│   └── 3_🧪_Backtesting.py   # מנוע סימולציה היסטורי נר-אחר-נר
+├── pages/                    # ממשקי משתמש מרובי עמודים (Streamlit Multi-Page)
+│   ├── 1_📡_Live_Trading.py  # דשבורד מסחר חי, מתג שליטה ב-AI ויומן החלטות דינמי
+│   ├── 2_🔍_SQL_Explorer.py  # מעבדת חקר נתונים, גרף Plotly, סנכרון SQL ואימות
+│   └── 3_🧪_Backtesting.py   # מעבדת סימולציה היסטורית (Replay) ושליטה בסוכנים
 │
-├── src/                      # מנועים דטרמיניסטיים (לוגיקה, נתונים וסיכונים)
-│   ├── data_loader.py        # ניהול I/O מול Alpaca ומסד הנתונים SQLite
-│   ├── processor.py          # עיבוד וקטורי של אינדיקטורים מתמטיים ב-RAM
-│   ├── live_stream_engine.py # האזנה ל-WebSocket (Alpaca IEX) ועדכון בזמן אמת
-│   ├── replay_engine.py      # מנוע סימולציה לשחזור ימי עבר
-│   └── risk_manager.py       # אכיפת חוקי ברזל קשיחים (Hard Risk Guard)
+├── src/                      # מנועים דטרמיניסטיים ב-RAM, מנהלי נתונים וסיכונים
+│   ├── data_loader.py        # סנכרון דלתא מול Alpaca ושליפות SQL גמישות
+│   ├── processor.py          # עיבוד אינדיקטורים מתמטי ב-RAM, Resampling ו-Summary ל-AI
+│   ├── live_stream_engine.py # קליטת WebSocket (IEX), סינון Pre-Filter והפרדה אסינכרונית ל-AI
+│   ├── replay_engine.py      # מנוע סימולציית נר-אחר-נר ללא Lookahead Bias
+│   ├── risk_guard.py         # שכבת בקרת סיכונים קשיחה (Hard Risk Guard)
+│   ├── executor.py           # שיגור פקודות Bracket וניהול ביצוע מול Alpaca Paper
+│   └── ui_helpers.py         # פונקציות עזר ויזואליות לעיצוב נתונים ב-Streamlit
 │
-└── agents/                   # שכבת תזמורת סוכני ה-AI
-    ├── macro_agent.py        # סוכן מגמת מאקרו ורמות יומיות (Daily / 4H)
-    ├── structure_agent.py    # סוכן מבנה שוק והיצע/ביקוש (1H / 15m)
-    ├── trigger_agent.py      # סוכן טריגר תוך-יומי ונפח (5m / 1m)
-    └── orchestrator.py       # מנצח התזמורת (Waterfall & TradeSignal JSON)
+└── agents/                   # תזמורת סוכני ה-AI (Gemini / LLM)
+    ├── schemas.py            # מודלי Pydantic למבנה פלט מוגדר היטב (TradeSignal)
+    ├── macro_agent.py        # סוכן מגמת-על יומי (Daily / 4H)
+    ├── structure_agent.py    # סוכן מבנה שוק, Pivot ואזורי ביקוש/היצע (15m)
+    ├── trigger_agent.py      # סוכן תזמון תוך-יומי מול VWAP ונפח RVOL (1m / 5m)
+    └── orchestrator.py       # מנצח התזמורת במודל Waterfall עם Short-Circuiting
 
 
+
+[Alpaca IEX WebSocket] (נר 1m חי)
+         │
+         ▼
+[LiveIEXTraderEngine] ──► שמירה ישירה ל-SQLite (candles) במצב WAL
+         │
+         ├── עדכון חוצץ RAM (חלון מתגלגל של 60 נרות)
+         │
+         ├── בדיקת מתג UI (_is_ai_enabled מ-system_settings)
+         │
+         ├── סינון מתמטי מקדים ב-RAM (passes_pre_filter: RVOL, Dist ATR, Z-Score)
+         │
+         ├── בדיקת HardRiskGuard (מגבלת 3 פוזיציות, 2 הפסדים יומיים, חלונות זמן NY)
+         │
+         ▼ (אסינכרוני / Background Task)
+[DataProcessor] ──► יצירת נרות 15m (Resample ב-RAM)
+                ──► חישוב EMA, VWAP, RVOL, ATR ורמות מפתח ב-RAM
+                ──► בניית data_bundle מפולח (Macro, Structure, Trigger)
+         │
+         ▼
+[TradingOrchestrator] (Waterfall & Short-Circuit)
+         │
+         ├── 🌐 Macro Agent: כיוון מגמת-על (BULLISH/BEARISH/NEUTRAL)
+         │       └── אם NEUTRAL ──► HOLD (עצירה מוקדמת וחיסכון בקריאות)
+         │
+         ├── 🏗️ Structure Agent: בדיקת אזורי עניין ורמות תמיכה/התנגדות
+         │       └── אם לא באזור עניין ──► HOLD (עצירה מוקדמת)
+         │
+         └── ⚡ Trigger Agent:
+                 └── פלט החלטה: TradeSignal (BUY / SELL / HOLD)
+         │
+         ▼
+[רישום וביצוע]
+         ├── שמירת החלטה מלאה/שגיאה ב-SQLite (ai_decisions)
+         ├── שיגור פקודת Bracket (Entry, SL, TP) דרך AlpacaExecutor
+         └── עדכון חי ב-Streamlit Dashboard
+
+         

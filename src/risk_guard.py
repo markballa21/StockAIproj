@@ -28,8 +28,8 @@ class HardRiskGuard:
         # 4. חלונות זמן (EST)
         now_ny = datetime.now(self.ny_tz)
         current_hm = now_ny.strftime("%H:%M")
-        if "09:30" <= current_hm < "09:40":
-            return False, "Opening volatility buffer: No trading first 10 minutes."
+        if "09:30" <= current_hm < "09:35":
+            return False, "Opening volatility buffer: No trading first 5 minutes."
         if current_hm >= "15:50":
             return False, "EOD cutoff: No entries after 15:50 EST."
 

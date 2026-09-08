@@ -70,20 +70,33 @@ class LiveIEXTraderEngine:
     self._seed_ram_from_db()
 
   def _init_decisions_table(self) -> None:
-    """יצירת טבלת ai_decisions במידה ואינה קיימת."""
-    with sqlite3.connect(self.config.DB_PATH) as conn:
-      conn.execute("""
-                CREATE TABLE IF NOT EXISTS ai_decisions (
-                    timestamp DATETIME,
-                    symbol TEXT,
-                    action TEXT,
-                    confidence REAL,
-                    entry_price REAL,
-                    stop_loss REAL,
-                    take_profit REAL,
-                    reasoning TEXT
-                );
-            """)
+      """יצירת טבלת ai_decisions וביצוע Migration אוטומטי לעמודות חסרות."""
+      with sqlite3.connect(self.config.DB_PATH) as conn:
+          # 1. יצירת הטבלה אם אינה קיימת כלל
+          conn.execute("""
+              CREATE TABLE IF NOT EXISTS ai_decisions (
+                  timestamp DATETIME,
+                  symbol TEXT,
+                  action TEXT,
+                  confidence REAL,
+                  entry_price REAL,
+                  stop_loss REAL,
+                  take_profit REAL,
+                  reasoning TEXT,
+                  status TEXT DEFAULT 'SUCCESS',
+                  error_msg TEXT
+              );
+          """)
+
+          # 2. הוספת עמודות חסרות במידה והטבלה נוצרה במבנה ישן
+          cursor = conn.execute("PRAGMA table_info(ai_decisions);")
+          existing_columns = [row[1] for row in cursor.fetchall()]
+
+          if "status" not in existing_columns:
+              conn.execute("ALTER TABLE ai_decisions ADD COLUMN status TEXT DEFAULT 'SUCCESS';")
+
+          if "error_msg" not in existing_columns:
+              conn.execute("ALTER TABLE ai_decisions ADD COLUMN error_msg TEXT;")
 
   def _seed_ram_from_db(self) -> None:
     """טעינת היסטוריית 1m אחרונה מה-SQL ל-RAM."""
